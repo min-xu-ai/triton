@@ -9,7 +9,9 @@ def _to_ir(x, builder):
     if isinstance(x, bool):
         return builder.get_int1(x)
     elif isinstance(x, int):
-        return builder.get_int32(x)
+        if x.__abs__() <= 2**31:
+            return builder.get_int32(x)
+        return builder.get_int64(x)
     elif isinstance(x, float):
         return builder.get_float32(x)
     if isinstance(x, block):
@@ -307,7 +309,7 @@ def zeros(shape, dtype, _builder=None):
 
     :param shape: Shape of the new array, e.g., (8, 16) or (8, )
     :type shape: tuple of ints
-    :param dtype: Data-type of the new array, e.g., :code:`triton.float16`
+    :param dtype: Data-type of the new array, e.g., :code:`tl.float16`
     :type dtype: DType
     """
     shape = [int(x.handle) if isinstance(x, block) else x for x in shape]
@@ -635,6 +637,10 @@ def max_contiguous(input, value, _builder=None):
 # -----------------------
 # Standard library
 # -----------------------
+
+@triton.jit
+def abs(x):
+    return where(x >= 0, x, -x)
 
 @triton.jit
 def cdiv(x, div):
