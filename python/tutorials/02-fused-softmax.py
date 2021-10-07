@@ -105,82 +105,33 @@ def softmax_kernel_big_row(
     # The stride represents how much we need to increase the pointer to advance 1 row
     row_start_ptr = input_ptr + row_idx * input_row_stride
 
+    N_BLOCKS = 2
     BLOCK_SIZE = meta['BLOCK_SIZE'] // 2
 
-    tl_max = tl.zeros((1,), tl.float32) * float('-inf')
-    tl_sum = tl.zeros((1,), tl.float32)
-    #for (seg, action) in iter([(0, "load_max"), (1, "load_max_sum"), (0, "load_sum_write"), (1, "load_write")]):
-    if True:
-        # seg: segment ID
-        (seg, action) = (0, 0)
-        col_offsets = tl.arange(0, BLOCK_SIZE) + seg * BLOCK_SIZE
+    # Having this computed inside loop doesn't work. Error out on "BLOCK_SIZE" is phi
+    # node, not an int.
+    col_offsets_base = tl.arange(0, BLOCK_SIZE)
+
+    tl_max = float('-inf')
+    for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
+        col_offsets = col_offsets_base + col_start
         input_ptrs = row_start_ptr + col_offsets
-
         row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
-
-        # load_max: 0
-        # load_max_sum: 1
-        # load_sum_write: 2
-        # load_write: 3
-
-        #if action == 0 or action == 1:  # max in action
-        #    tl_max = tl.maximum(tl_max, tl.max(row, axis=0))
-
-        #if action == 1 or action == 2:  # "sum" in action
-        #    row_minus_max = row - tl_max
-        #    numerator = tl.exp(row_minus_max)
-        #    denominator = tl.sum(numerator, axis=0)
-        #    tl_sum += tl.sum(numerator, axis=0)
-
-        #if action == 2 or action == 3:  # "write" in action:
-        #    softmax_output = row / tl_sum
-        #    # Write back output to DRAM
-        #    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-        #    output_ptrs = output_row_start_ptr + col_offsets
-        #    tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
-
         tl_max = tl.maximum(tl_max, tl.max(row, axis=0))
 
-        # seg: segment ID
-        (seg, action) = (1, 1)
-        col_offsets = tl.arange(0, BLOCK_SIZE) + seg * BLOCK_SIZE
+    tl_sum = 0.0
+    for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
+        col_offsets = col_offsets_base + col_start
         input_ptrs = row_start_ptr + col_offsets
-
         row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+        tl_sum += tl.sum(tl.exp(row - tl_max), axis=0)
 
-        tl_max = tl.maximum(tl_max, tl.max(row, axis=0))
-
-        row_minus_max = row - tl_max
-        numerator = tl.exp(row_minus_max)
-        tl_sum += tl.sum(numerator, axis=0)
-
-        # seg: segment ID
-        (seg, action) = (0, 2)
-        col_offsets = tl.arange(0, BLOCK_SIZE) + seg * BLOCK_SIZE
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+    for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
+        col_offsets = col_offsets_base + col_start
         input_ptrs = row_start_ptr + col_offsets
-
         row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
-
-        row_minus_max = row - tl_max
-        numerator = tl.exp(row_minus_max)
-        tl_sum += tl.sum(numerator, axis=0)
-
         softmax_output = tl.exp(row - tl_max) / tl_sum
-        # Write back output to DRAM
-        output_row_start_ptr = output_ptr + row_idx * output_row_stride
-        output_ptrs = output_row_start_ptr + col_offsets
-        tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
-
-        # seg: segment ID
-        (seg, action) = (1, 3)
-        col_offsets = tl.arange(0, BLOCK_SIZE) + seg * BLOCK_SIZE
-        input_ptrs = row_start_ptr + col_offsets
-
-        row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
-
-        softmax_output = tl.exp(row - tl_max) / tl_sum
-        # Write back output to DRAM
-        output_row_start_ptr = output_ptr + row_idx * output_row_stride
         output_ptrs = output_row_start_ptr + col_offsets
         tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
 
@@ -254,7 +205,7 @@ print("big row result: ", torch.allclose(y_triton, y_torch))
     triton.testing.Benchmark(
         x_names=['N'],  # argument names to use as an x-axis for the plot
         x_vals=[
-            128 * i for i in (list(range(2, 100)) + [512])
+            128 * i for i in (list(range(99, 100)) + [512])
         ],  # different possible values for `x_name`
         line_arg='provider',  # argument name whose value corresponds to a different line in the plot
         line_vals=[
@@ -276,11 +227,11 @@ print("big row result: ", torch.allclose(y_triton, y_torch))
 def benchmark(M, N, provider):
     x = torch.randn(M, N, device='cuda', dtype=torch.float32)
     if provider == 'torch-native':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1))
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1), rep=100, warmup=25)
     if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax(x))
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: softmax(x), rep=100, warmup=25)
     if provider == 'torch-jit':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: naive_softmax(x))
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: naive_softmax(x), rep=1, warmup=1)
     gbps = lambda ms: 2 * x.nelement() * x.element_size() * 1e-9 / (ms * 1e-3)
     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
