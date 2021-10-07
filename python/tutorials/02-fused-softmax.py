@@ -115,6 +115,7 @@ def softmax_kernel_big_row(
     # Make row a global variable that's outside of the loops
     row = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
 
+    # all blocks.
     tl_max = float('-inf')
     for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
         col_offsets = col_offsets_base + col_start
@@ -122,20 +123,28 @@ def softmax_kernel_big_row(
         row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
         tl_max = tl.maximum(tl_max, tl.max(row, axis=0))
 
-    tl_sum = 0.0
-    for col_start in range((N_BLOCKS-1)*BLOCK_SIZE, -1, -BLOCK_SIZE):
-        if col_start != (N_BLOCKS-1) * BLOCK_SIZE:
-            col_offsets = col_offsets_base + col_start
-            input_ptrs = row_start_ptr + col_offsets
-            row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+    # last block
+    tl_sum = tl.sum(tl.exp(row - tl_max), axis=0)
+    # rest
+    for col_start in range((N_BLOCKS-2)*BLOCK_SIZE, -1, -BLOCK_SIZE):
+        col_offsets = col_offsets_base + col_start
+        input_ptrs = row_start_ptr + col_offsets
+        row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
         tl_sum += tl.sum(tl.exp(row - tl_max), axis=0)
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
-    for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
+
+    # col_start == 0
+    col_offsets = col_offsets_base
+    softmax_output = tl.exp(row - tl_max) / tl_sum
+    output_ptrs = output_row_start_ptr + col_offsets
+    tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
+
+    # rest
+    for col_start in range(BLOCK_SIZE, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
         col_offsets = col_offsets_base + col_start
-        if col_start != 0:
-            input_ptrs = row_start_ptr + col_offsets
-            row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+        input_ptrs = row_start_ptr + col_offsets
+        row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
         softmax_output = tl.exp(row - tl_max) / tl_sum
         output_ptrs = output_row_start_ptr + col_offsets
         tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
