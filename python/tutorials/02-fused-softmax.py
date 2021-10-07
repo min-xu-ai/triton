@@ -112,6 +112,9 @@ def softmax_kernel_big_row(
     # node, not an int.
     col_offsets_base = tl.arange(0, BLOCK_SIZE)
 
+    # Make row a global variable that's outside of the loops
+    row = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+
     tl_max = float('-inf')
     for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
         col_offsets = col_offsets_base + col_start
@@ -121,16 +124,18 @@ def softmax_kernel_big_row(
 
     tl_sum = 0.0
     for col_start in range((N_BLOCKS-1)*BLOCK_SIZE, -1, -BLOCK_SIZE):
-        col_offsets = col_offsets_base + col_start
-        input_ptrs = row_start_ptr + col_offsets
-        row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+        if col_start != (N_BLOCKS-1) * BLOCK_SIZE:
+            col_offsets = col_offsets_base + col_start
+            input_ptrs = row_start_ptr + col_offsets
+            row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
         tl_sum += tl.sum(tl.exp(row - tl_max), axis=0)
 
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
         col_offsets = col_offsets_base + col_start
-        input_ptrs = row_start_ptr + col_offsets
-        row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
+        if col_start != 0:
+            input_ptrs = row_start_ptr + col_offsets
+            row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
         softmax_output = tl.exp(row - tl_max) / tl_sum
         output_ptrs = output_row_start_ptr + col_offsets
         tl.store(output_ptrs, softmax_output, mask=col_offsets < n_cols)
