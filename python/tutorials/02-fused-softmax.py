@@ -120,7 +120,7 @@ def softmax_kernel_big_row(
         tl_max = tl.maximum(tl_max, tl.max(row, axis=0))
 
     tl_sum = 0.0
-    for col_start in range(0, N_BLOCKS*BLOCK_SIZE, BLOCK_SIZE):
+    for col_start in range((N_BLOCKS-1)*BLOCK_SIZE, -1, -BLOCK_SIZE):
         col_offsets = col_offsets_base + col_start
         input_ptrs = row_start_ptr + col_offsets
         row = tl.load(input_ptrs, mask=col_offsets < n_cols, other=-float('inf'))
